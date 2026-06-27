@@ -1,8 +1,37 @@
-import type { RepoFacts, FactsItem } from "../types/facts.js";
+import type { RepoFacts, FactsItem, FactCategory } from "../types/facts.js";
 import type { ContentEvidenceMap } from "../types/run.js";
 
 /**
+ * README 章节标题 → 事实类别映射。
+ * AI 生成的 ## 章节名对应到 RepoFacts 中的 category。
+ */
+const SECTION_TO_CATEGORY: Record<string, FactCategory> = {
+  "features": "purpose",
+  "tech stack": "tech_stack",
+  "installation": "installation",
+  "usage": "usage",
+  "configuration": "configuration",
+  "api": "api_surface",
+  "api surface": "api_surface",
+  "architecture": "architecture",
+  "dependencies": "dependencies",
+  "description": "description",
+  "project name": "project_name",
+  "purpose": "purpose",
+  "getting started": "installation",
+};
+
+/**
+ * 根据章节标题查找对应的事实类别。
+ */
+function mapSectionToCategory(section: string): FactCategory | null {
+  const normalized = section.toLowerCase().trim();
+  return SECTION_TO_CATEGORY[normalized] || null;
+}
+
+/**
  * 生成内容到证据的映射。
+ * 用类别名匹配而非内容子串匹配，因为 AI 会重写文字。
  */
 export function buildContentEvidenceMap(
   generatedReadme: string,
@@ -17,13 +46,13 @@ export function buildContentEvidenceMap(
 
   for (const line of lines) {
     if (line.startsWith("## ")) {
-      // 保存上一节
       if (currentSection && currentContent.trim()) {
+        const category = mapSectionToCategory(currentSection);
         sections.push({
           section: currentSection,
           content: currentContent.trim(),
-          evidenceRefs: findEvidenceRefs(currentContent, facts.items),
-          hasEvidence: hasSupportingEvidence(currentContent, facts.items),
+          evidenceRefs: findEvidenceByCategory(category, facts.items),
+          hasEvidence: hasEvidenceByCategory(category, facts.items),
         });
       }
       currentSection = line.replace(/^## /, "").trim();
@@ -39,25 +68,35 @@ export function buildContentEvidenceMap(
 
   // 最后一节
   if (currentSection && currentContent.trim()) {
+    const category = mapSectionToCategory(currentSection);
     sections.push({
       section: currentSection,
       content: currentContent.trim(),
-      evidenceRefs: findEvidenceRefs(currentContent, facts.items),
-      hasEvidence: hasSupportingEvidence(currentContent, facts.items),
+      evidenceRefs: findEvidenceByCategory(category, facts.items),
+      hasEvidence: hasEvidenceByCategory(category, facts.items),
     });
   }
 
   return sections;
 }
 
-function findEvidenceRefs(content: string, items: FactsItem[]): number[] {
-  return items
-    .map((item, idx) => (content.includes(item.content.slice(0, 30)) ? idx : -1))
-    .filter((idx) => idx >= 0);
+/**
+ * 按事实类别查找匹配的事实项索引。
+ * 优先用类别名精确匹配（大小写不敏感），回退到内容子串匹配。
+ */
+function findEvidenceByCategory(category: FactCategory | null, items: FactsItem[]): number[] {
+  const refs: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    if (category && items[i].category === category) {
+      refs.push(i);
+    }
+  }
+  return refs;
 }
 
-function hasSupportingEvidence(content: string, items: FactsItem[]): boolean {
-  return findEvidenceRefs(content, items).length > 0;
+function hasEvidenceByCategory(category: FactCategory | null, items: FactsItem[]): boolean {
+  if (!category) return false;
+  return items.some((item) => item.category === category);
 }
 
 /**

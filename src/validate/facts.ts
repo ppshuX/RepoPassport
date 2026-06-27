@@ -33,7 +33,7 @@ export const RepoMetaSchema = z.object({
   name: z.string().min(1),
   url: z.string().url(),
   defaultBranch: z.string().min(1),
-  commitSha: z.string().length(40),
+  commitSha: z.string().min(7).max(40),
 });
 
 export const RepoFactsSchema = z.object({
