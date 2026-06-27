@@ -1,8 +1,9 @@
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { RepoMeta } from "../types/facts.js";
 import type { Logger } from "../utils/log.js";
 import { detectPlatform } from "../platform/index.js";
@@ -16,6 +17,14 @@ export interface CloneResult {
 }
 
 /**
+ * 判断是否为本地文件系统路径（目录且包含 .git）。
+ */
+export function isLocalRepo(path: string): boolean {
+  const resolved = resolve(path);
+  return existsSync(resolved) && existsSync(join(resolved, ".git"));
+}
+
+/**
  * 校验仓库 URL 是否被任一平台支持。
  */
 export function validateRepoUrl(url: string): boolean {
@@ -23,7 +32,7 @@ export function validateRepoUrl(url: string): boolean {
     detectPlatform(url);
     return true;
   } catch {
-    return false;
+    return isLocalRepo(url);
   }
 }
 
@@ -53,6 +62,7 @@ function extractRepoName(url: string): { owner: string; name: string; platform?:
 
 /**
  * 在临时目录中浅克隆仓库（depth=1）。
+ * 支持远程 URL 和本地路径。
  * 返回临时目录路径和仓库元信息。
  */
 export async function cloneRepo(url: string, log: Logger): Promise<CloneResult> {
@@ -60,10 +70,21 @@ export async function cloneRepo(url: string, log: Logger): Promise<CloneResult> 
   log.verbose(`临时目录: ${tempDir}`);
 
   try {
-    log.info(`浅克隆 ${url} ...`);
-    await execAsync(`git clone --depth=1 "${url}" "${tempDir}"`, {
-      timeout: 120_000,
-    });
+    const isLocal = isLocalRepo(url);
+    const sourcePath = isLocal ? resolve(url) : url;
+
+    if (isLocal) {
+      log.info(`从本地路径克隆 ${sourcePath} ...`);
+      // 本地路径使用 --no-hardlinks 避免 Windows 上的权限问题
+      await execAsync(`git clone --depth=1 --no-hardlinks "file://${sourcePath}" "${tempDir}"`, {
+        timeout: 120_000,
+      });
+    } else {
+      log.info(`浅克隆 ${sourcePath} ...`);
+      await execAsync(`git clone --depth=1 "${sourcePath}" "${tempDir}"`, {
+        timeout: 120_000,
+      });
+    }
 
     // 获取 HEAD commit SHA
     const { stdout: shaOut } = await execAsync("git rev-parse HEAD", { cwd: tempDir });

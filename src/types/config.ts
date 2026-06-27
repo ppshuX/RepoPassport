@@ -12,7 +12,7 @@ export interface ProviderConfig {
 export interface PrepareOptions {
   provider: string;
   model?: string;
-  dryRun: boolean;
+  submit: boolean;
   output?: string;
   verbose: boolean;
   platform?: PlatformType;

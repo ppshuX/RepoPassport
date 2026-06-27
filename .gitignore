@@ -7,10 +7,10 @@ dist/
 # TypeScript
 *.tsbuildinfo
 
-# Environment
+# Environment / API Keys
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
 
 # Test artifacts
 coverage/
@@ -26,3 +26,6 @@ Thumbs.db
 
 # Debug logs
 npm-debug.log*
+
+# CodeBuddy IDE runtime
+.codebuddy/

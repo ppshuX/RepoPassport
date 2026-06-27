@@ -3,7 +3,7 @@ import { z } from "zod";
 export const EvidenceSchema = z.object({
   sourceType: z.enum(["file", "config", "dependency", "export"]),
   filePath: z.string().min(1),
-  commitSha: z.string().length(40),
+  commitSha: z.string().min(1),
   symbol: z.string().optional(),
   lineRange: z.tuple([z.number().int().positive(), z.number().int().positive()]).optional(),
   confidence: z.number().min(0).max(1),
