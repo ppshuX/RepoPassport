@@ -1,4 +1,4 @@
-import { validateGitHubUrl, cloneRepo } from "../repo/clone.js";
+import { cloneRepo } from "../repo/clone.js";
 import { cleanupTempDir } from "../repo/cleanup.js";
 import { collectFiles } from "../repo/files.js";
 import { createProvider, MockProvider } from "../ai/client.js";
@@ -12,8 +12,7 @@ import type { PrepareOptions, ProviderConfig } from "../types/config.js";
 import type { Provider } from "../ai/client.js";
 import type { RepoFacts, FileContent, RepoMeta } from "../types/facts.js";
 import type { GenerationRun, ContentEvidenceMap } from "../types/run.js";
-import { forkRepo } from "../pr/fork.js";
-import { createDraftPr } from "../pr/create.js";
+import { detectPlatform } from "../platform/index.js";
 import {
   addForkRemote,
   removeForkRemote,
@@ -42,10 +41,16 @@ export async function prepareCommand(
   const log = createLogger(options.verbose);
   const runId = uuid();
 
+  // ── 0. 检测平台 ──
+  const { adapter } = detectPlatform(repoUrl);
+  const platform = adapter.type;
+  log.info(`检测到平台: ${adapter.displayName}`);
+
   // 记录运行
   const run: GenerationRun = {
     id: runId,
     repoUrl,
+    platform,
     startedAt: new Date().toISOString(),
     steps: {
       clone: { status: "pending" },
@@ -59,23 +64,18 @@ export async function prepareCommand(
   let tempDir: string | undefined;
 
   try {
-    // ── 0. 前置检查 ──
+    // ── 1. 前置检查 ──
     log.info("检查前置条件...");
-
-    // 校验 URL
-    if (!validateGitHubUrl(repoUrl)) {
-      throw new Error(`无效的 GitHub URL: ${repoUrl}\n格式: https://github.com/owner/repo`);
-    }
 
     // 检查 git 可用
     checkGitAvailable(log);
 
-    // 检查 gh CLI（dry-run 模式下不强制）
+    // 检查平台前置条件（gh/gitee token 等）
     if (!options.dryRun) {
-      checkGhAvailable(log);
+      adapter.checkPrerequisites(log);
     }
 
-    // ── 1. 克隆与分析 ──
+    // ── 2. 克隆与分析 ──
     run.steps.clone = { status: "running", startedAt: new Date().toISOString() };
     const cloneResult = await cloneRepo(repoUrl, log);
     tempDir = cloneResult.tempDir;
@@ -90,7 +90,7 @@ export async function prepareCommand(
       (f) => f.path.endsWith("/README.md") || f.path.endsWith("\\README.md"),
     )?.content;
 
-    // ── 2. 事实提取 ──
+    // ── 3. 事实提取 ──
     run.steps.extract = { status: "running", startedAt: new Date().toISOString() };
     const provider = createProviderFromOptions(options);
     const facts = await extractFacts(
@@ -101,7 +101,7 @@ export async function prepareCommand(
     );
     run.steps.extract = { status: "completed", completedAt: new Date().toISOString() };
 
-    // ── 3. 文档生成 ──
+    // ── 4. 文档生成 ──
     run.steps.generate = { status: "running", startedAt: new Date().toISOString() };
     const generatedReadme = await generateReadme(
       facts,
@@ -111,19 +111,20 @@ export async function prepareCommand(
     );
     run.steps.generate = { status: "completed", completedAt: new Date().toISOString() };
 
-    // ── 4. 构建内容证据映射 ──
+    // ── 5. 构建内容证据映射 ──
     const contentEvidenceMap = buildContentEvidenceMap(generatedReadme, facts);
 
     // 过滤无证据章节
     const filteredReadme = filterReadmeByEvidence(generatedReadme, contentEvidenceMap);
 
-    // ── 5. 展示审核界面 ──
+    // ── 6. 展示审核界面 ──
     run.steps.review = { status: "running", startedAt: new Date().toISOString() };
 
     console.log("\n" + "═".repeat(72));
     console.log("  RepoPassport — 英文 README 草稿");
     console.log("═".repeat(72));
     console.log(`  仓库: ${cloneResult.meta.owner}/${cloneResult.meta.name}`);
+    console.log(`  平台: ${adapter.displayName}`);
     console.log(`  Commit: ${cloneResult.meta.commitSha.slice(0, 7)}`);
     console.log(`  Provider: ${options.provider}`);
     console.log(`  模式: ${options.dryRun ? "Dry-run (不执行 Git 操作)" : "正式模式"}`);
@@ -143,7 +144,7 @@ export async function prepareCommand(
     // 显示证据报告
     console.log("\n" + formatEvidenceReport(facts, contentEvidenceMap));
 
-    // ── 6. 交互式确认 ──
+    // ── 7. 交互式确认 ──
     const choice = await promptUser();
 
     if (choice === "n") {
@@ -215,7 +216,7 @@ export async function prepareCommand(
         try {
           // Step 1: Fork
           log.info("── Fork 仓库 ──");
-          const forkResult = await forkRepo(
+          const forkResult = await adapter.forkRepo(
             cloneResult.meta.owner,
             cloneResult.meta.name,
             log,
@@ -256,23 +257,26 @@ export async function prepareCommand(
 
           // Step 7: 创建 Draft PR
           log.info("── 创建 Draft PR ──");
-          const prResult = await createDraftPr(
-            cloneResult.meta.owner,
-            cloneResult.meta.name,
-            cloneResult.meta.defaultBranch,
-            forkOwner,
-            branchName,
-            "docs: add English README",
-            "## Summary\n\n" +
-              "AI-assisted English README generation. Human-reviewed before submission.\n\n" +
-              "## What Changed\n\n" +
-              `- Added ${englishReadmeName} (English README)\n` +
-              "- Original Chinese README.md preserved\n\n" +
-              "Evidence extracted from:\n" +
-              "- package.json\n" +
-              "- Source files\n" +
-              "- Existing documentation\n\n" +
-              `Generated by RepoPassport (run: ${runId})`,
+          const prResult = await adapter.createDraftPr(
+            {
+              targetOwner: cloneResult.meta.owner,
+              targetRepo: cloneResult.meta.name,
+              baseBranch: cloneResult.meta.defaultBranch,
+              headUser: forkOwner,
+              headBranch: branchName,
+              title: "docs: add English README",
+              body:
+                "## Summary\n\n" +
+                "AI-assisted English README generation. Human-reviewed before submission.\n\n" +
+                "## What Changed\n\n" +
+                `- Added ${englishReadmeName} (English README)\n` +
+                "- Original Chinese README.md preserved\n\n" +
+                "Evidence extracted from:\n" +
+                "- package.json\n" +
+                "- Source files\n" +
+                "- Existing documentation\n\n" +
+                `Generated by RepoPassport (run: ${runId})`,
+            },
             log,
           );
 
@@ -283,6 +287,7 @@ export async function prepareCommand(
             {
               id: prRecordId,
               runId,
+              platform,
               prUrl: prResult.prUrl,
               targetRepo: `${cloneResult.meta.owner}/${cloneResult.meta.name}`,
               forkUrl,
@@ -391,28 +396,6 @@ function checkGitAvailable(log: Logger): void {
     log.verbose("git 可用");
   } catch {
     throw new Error("未找到 git。请安装 git: https://git-scm.com");
-  }
-}
-
-/**
- * 检查 gh CLI 是否可用并已登录。
- */
-function checkGhAvailable(log: Logger): void {
-  try {
-    execSync("gh --version", { stdio: "pipe" });
-    log.verbose("gh CLI 可用");
-
-    try {
-      execSync("gh auth status", { stdio: "pipe" });
-      log.verbose("gh 已登录");
-    } catch {
-      throw new Error("gh CLI 未登录。请运行: gh auth login");
-    }
-  } catch (err) {
-    if (err instanceof Error && err.message.includes("未登录")) throw err;
-    throw new Error(
-      "未找到 GitHub CLI (gh)。请安装: https://cli.github.com\n或使用 --dry-run 模式。",
-    );
   }
 }
 

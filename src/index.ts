@@ -9,12 +9,12 @@ const program = new Command();
 
 program
   .name("repopassport")
-  .description("AI-assisted English README generation for Chinese open-source projects")
+  .description("AI-assisted English README generation for open-source projects (GitHub / Gitee / ACGit)")
   .version("0.1.0");
 
 program
   .command("prepare <repo-url>")
-  .description("Analyze a GitHub repository and generate an English README draft")
+  .description("Analyze a repository and generate an English README draft (supports github.com, gitee.com, git.woa.com)")
   .option("-p, --provider <name>", "AI Provider (openai, mock)", "mock")
   .option("-m, --model <name>", "Model name override")
   .option("--dry-run", "Only generate draft, do not fork or create PR", false)

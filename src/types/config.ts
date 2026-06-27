@@ -1,3 +1,5 @@
+import type { PlatformType } from "../platform/index.js";
+
 /** AI Provider 配置 */
 export interface ProviderConfig {
   provider: "openai" | "mock";
@@ -13,4 +15,5 @@ export interface PrepareOptions {
   dryRun: boolean;
   output?: string;
   verbose: boolean;
+  platform?: PlatformType;
 }

@@ -1,0 +1,10 @@
+src/
+tests/
+fixtures/
+docs/
+node_modules/
+.codebuddy/
+tsconfig.json
+vitest.config.ts
+.gitignore
+.npmignore

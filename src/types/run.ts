@@ -24,10 +24,13 @@ export interface DocumentDraft {
   contentEvidenceMap: ContentEvidenceMap[];
 }
 
+import type { PlatformType } from "../platform/index.js";
+
 /** PR 记录 */
 export interface PullRequestRecord {
   id: string;
   runId: string;
+  platform: PlatformType;
   prUrl: string;
   targetRepo: string;
   forkUrl: string;
@@ -43,6 +46,7 @@ export interface PullRequestRecord {
 export interface GenerationRun {
   id: string;
   repoUrl: string;
+  platform: PlatformType;
   startedAt: string;
   completedAt?: string;
   steps: {

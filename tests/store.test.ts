@@ -8,6 +8,7 @@ import {
 } from "../src/store/runs.js";
 import { createLogger } from "../src/utils/log.js";
 import type { GenerationRun, PullRequestRecord } from "../src/types/run.js";
+import type { PlatformType } from "../src/platform/index.js";
 import { v4 as uuid } from "uuid";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -32,6 +33,7 @@ describe("store/runs", () => {
     const run: GenerationRun = {
       id: runId,
       repoUrl: "https://github.com/test/repo",
+      platform: "github",
       startedAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),
       steps: {
@@ -63,6 +65,7 @@ describe("store/runs", () => {
     const record: PullRequestRecord = {
       id: recordId,
       runId: uuid(),
+      platform: "github",
       prUrl,
       targetRepo: "test/repo",
       forkUrl: "https://github.com/user/repo.git",
@@ -92,6 +95,7 @@ describe("store/runs", () => {
     const record: PullRequestRecord = {
       id: recordId,
       runId: uuid(),
+      platform: "github",
       prUrl,
       targetRepo: "test/repo",
       forkUrl: "https://github.com/user/repo.git",
@@ -118,6 +122,7 @@ describe("store/runs", () => {
     const run: GenerationRun = {
       id: runId,
       repoUrl: "https://github.com/test/repo",
+      platform: "github",
       startedAt: new Date().toISOString(),
       steps: {
         clone: { status: "failed", error: "网络错误", at: new Date().toISOString() },

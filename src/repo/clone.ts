@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { RepoMeta } from "../types/facts.js";
 import type { Logger } from "../utils/log.js";
+import { detectPlatform } from "../platform/index.js";
+import type { ParsedRepoUrl } from "../platform/index.js";
 
 const execAsync = promisify(exec);
 
@@ -14,29 +16,35 @@ export interface CloneResult {
 }
 
 /**
- * 从 GitHub URL 解析 owner 和 name。
+ * 校验仓库 URL 是否被任一平台支持。
  */
-export function parseRepoUrl(url: string): { owner: string; name: string } | null {
-  const match = url.match(/^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/);
-  if (!match) return null;
-  return { owner: match[1], name: match[2] };
+export function validateRepoUrl(url: string): boolean {
+  try {
+    detectPlatform(url);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
- * 校验公开 GitHub URL 格式。
+ * 从 URL 解析仓库信息（平台、owner、name）。
  */
-export function validateGitHubUrl(url: string): boolean {
-  return parseRepoUrl(url) !== null;
+export function parseRepoUrl(url: string): ParsedRepoUrl | null {
+  try {
+    return detectPlatform(url).parsed;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * 从任意 URL/路径中提取仓库名。
+ * 从任意 URL/路径中提取仓库名（用于 clone 阶段的 meta 生成）。
  */
-function extractRepoName(url: string): { owner: string; name: string } {
+function extractRepoName(url: string): { owner: string; name: string; platform?: string } {
   const parsed = parseRepoUrl(url);
-  if (parsed) return parsed;
+  if (parsed) return { owner: parsed.owner, name: parsed.name, platform: parsed.platform };
 
-  // 从路径中提取最后一个组件作为 repo name
   const clean = url.replace(/\\/g, "/").replace(/\/$/, "").replace(/\.git$/, "");
   const parts = clean.split("/");
   const name = parts[parts.length - 1] || "unknown";
