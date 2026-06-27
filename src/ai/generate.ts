@@ -101,6 +101,96 @@ function buildGenerateUserPrompt(
   return prompt;
 }
 
+/**
+ * 生成中文 README。仅在项目没有 README.md 时调用。
+ */
+export async function generateChineseReadme(
+  facts: RepoFacts,
+  provider: Provider,
+  log: Logger,
+): Promise<string> {
+  log.info("生成中文 README 草稿...");
+
+  const systemPrompt = buildChineseGenerateSystemPrompt();
+  const userPrompt = buildChineseGenerateUserPrompt(facts);
+
+  const response = await provider.chatCompletion([
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt },
+  ]);
+
+  const readme = extractMarkdown(response.content);
+  log.info(`中文 README 生成完成 (${readme.split("\n").length} 行)`);
+
+  return readme;
+}
+
+function buildChineseGenerateSystemPrompt(): string {
+  return `你是一名技术文档作者，为开源项目编写中文 README。
+
+关键规则：
+1. 只写 RepoFacts 中有证据支持的内容。没有证据 = 不写。
+2. 安装说明基于 package.json 的 scripts 和 dependencies。不要编造命令。
+3. 技术栈描述使用 package.json 中的真实包名。
+4. 使用示例仅当在源代码中找到实际 API 模式时才写。
+5. 不要编造"贡献指南"、"行为准则"等章节。
+6. 不要添加"Star History"、"License Badge"等装饰元素。
+7. 没有证据的章节直接省略。
+8. 用清晰、专业的中文写作。简洁、真实。
+9. 只输出 README 的 Markdown 内容。不要加任何解释。
+
+模板（仅包含有证据的章节）：
+# {项目名}
+
+{描述}
+
+## 功能特性
+
+{从源码确认的功能}
+
+## 技术栈
+
+{来自 package.json 的技术栈}
+
+## 安装
+
+{基于 package.json scripts 的安装步骤}
+
+## 使用方法
+
+{从源码导出确认的使用示例}
+
+## API
+
+{从确认的导出中提取的 API 接口}
+
+## 许可证
+
+{来自 LICENSE 文件或 package.json，找不到则省略}`;
+}
+
+function buildChineseGenerateUserPrompt(facts: RepoFacts): string {
+  const factsJson = JSON.stringify(
+    {
+      repo: facts.repo,
+      items: facts.items.map((item) => ({
+        category: item.category,
+        content: item.content,
+        confidence: item.combinedConfidence,
+      })),
+      overallConfidence: facts.overallConfidence,
+    },
+    null,
+    2,
+  );
+
+  let prompt = `仓库: ${facts.repo.owner}/${facts.repo.name}\n\n`;
+  prompt += `RepoFacts:\n\`\`\`json\n${factsJson}\n\`\`\`\n\n`;
+  prompt += `请仅根据以上 RepoFacts 生成一份中文 README。只返回 Markdown 内容。`;
+
+  return prompt;
+}
+
 function extractMarkdown(text: string): string {
   // 仅去掉显式 ```markdown ... ``` 包裹
   const block = text.match(/```markdown\s*([\s\S]*?)```/);

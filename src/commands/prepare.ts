@@ -3,7 +3,7 @@ import { cleanupTempDir } from "../repo/cleanup.js";
 import { collectFiles } from "../repo/files.js";
 import { createProvider, MockProvider } from "../ai/client.js";
 import { extractFacts } from "../ai/extract.js";
-import { generateReadme } from "../ai/generate.js";
+import { generateReadme, generateChineseReadme } from "../ai/generate.js";
 import { buildContentEvidenceMap, formatEvidenceReport } from "../evidence/report.js";
 import { showNewFileDiff, showDiff } from "../utils/diff.js";
 import { createLogger } from "../utils/log.js";
@@ -99,6 +99,13 @@ export async function prepareCommand(
 
     // ── 4. 文档生成 ──
     run.steps.generate = { status: "running", startedAt: new Date().toISOString() };
+
+    // 如果没有 README.md，先生成中文 README
+    let generatedChineseReadme: string | undefined;
+    if (!originalReadme) {
+      generatedChineseReadme = await generateChineseReadme(facts, provider, log);
+    }
+
     const generatedReadme = await generateReadme(facts, originalReadme, provider, log);
     run.steps.generate = { status: "completed", completedAt: new Date().toISOString() };
 
@@ -110,21 +117,32 @@ export async function prepareCommand(
     run.steps.review = { status: "running", startedAt: new Date().toISOString() };
 
     const targetRepo = `${cloneResult.meta.owner}/${cloneResult.meta.name}`;
+    const isDual = !originalReadme && !!generatedChineseReadme;
 
+    const title = isDual ? "中英文 README 草稿" : "英文 README 草稿";
     console.log("\n" + "═".repeat(72));
-    console.log("  RepoPassport — 英文 README 草稿");
+    console.log(`  RepoPassport — ${title}`);
     console.log("═".repeat(72));
     console.log(`  仓库: ${targetRepo}`);
     console.log(`  平台: ${adapter.displayName}`);
     console.log(`  Commit: ${cloneResult.meta.commitSha.slice(0, 7)}`);
     console.log(`  Provider: ${options.provider}`);
     console.log(`  模式: ${options.submit ? "提交模式 (--submit)" : "Dry-run (仅预览，无 Git 写操作)"}`);
+    if (isDual) {
+      console.log(`  生成: README.md (中文) + README.en.md (英文)`);
+    }
     console.log("═".repeat(72));
 
     const existingEnReadme = detectEnglishReadme(files);
 
-    // 显示 Diff
-    console.log("\n── Diff 预览 ──\n");
+    // 显示 Diff — 中文 README
+    if (generatedChineseReadme) {
+      console.log("\n── Diff 预览 [README.md] ──\n");
+      console.log(showNewFileDiff(generatedChineseReadme, "README.md"));
+    }
+
+    // 显示 Diff — 英文 README
+    console.log(`\n── Diff 预览 [README.en.md] ──\n`);
     if (existingEnReadme) {
       console.log(showDiff(existingEnReadme.content, filteredReadme, existingEnReadme.path));
     } else {
@@ -147,7 +165,7 @@ export async function prepareCommand(
       } else {
         // 先存草稿
         const draftPath = await saveDraftLocally(
-          runId, cloneResult.meta, filteredReadme, facts, contentEvidenceMap, log,
+          runId, cloneResult.meta, filteredReadme, facts, contentEvidenceMap, generatedChineseReadme, log,
         );
         console.log(`\n草稿已保存: ${draftPath}`);
         run.draftId = runId;
@@ -163,6 +181,7 @@ export async function prepareCommand(
           platform,
           options,
           filteredReadme,
+          generatedChineseReadme,
           files,
           log,
         });
@@ -178,7 +197,7 @@ export async function prepareCommand(
         await saveRun(run, log);
       } else {
         const draftPath = await saveDraftLocally(
-          runId, cloneResult.meta, filteredReadme, facts, contentEvidenceMap, log,
+          runId, cloneResult.meta, filteredReadme, facts, contentEvidenceMap, generatedChineseReadme, log,
         );
         console.log(`\n[Dry-run] 草稿已保存: ${draftPath}`);
         console.log("[Dry-run] 未执行任何 Git 写操作、未创建 Fork 或 PR。");
@@ -227,12 +246,13 @@ interface SubmitContext {
   platform: PlatformType;
   options: PrepareOptions;
   filteredReadme: string;
+  generatedChineseReadme?: string;
   files: FileContent[];
   log: Logger;
 }
 
 async function submitChanges(ctx: SubmitContext): Promise<void> {
-  const { run, runId, tempDir, cloneResult, adapter, platform, filteredReadme, files, log } = ctx;
+  const { run, runId, tempDir, cloneResult, adapter, platform, filteredReadme, generatedChineseReadme, files, log } = ctx;
   const targetRepo = `${cloneResult.meta.owner}/${cloneResult.meta.name}`;
 
   run.steps.submit = { status: "running", startedAt: new Date().toISOString() };
@@ -240,6 +260,12 @@ async function submitChanges(ctx: SubmitContext): Promise<void> {
   // 确定文件名
   const existingEn = detectEnglishReadme(files);
   const englishReadmeName = existingEn ? basename(existingEn.path) : "README.en.md";
+
+  // 写中文 README（如有）
+  if (generatedChineseReadme) {
+    await writeFile(join(tempDir, "README.md"), generatedChineseReadme, "utf-8");
+    log.info("中文 README.md 已写入临时目录");
+  }
 
   // 在临时克隆目录中写入英文 README
   const targetPath = join(tempDir, englishReadmeName);
@@ -280,13 +306,19 @@ async function submitChanges(ctx: SubmitContext): Promise<void> {
     // Step 4: Stage
     recoveryInfo.failedAt = "commit";
     log.info("── Stage 文件 ──");
+    if (generatedChineseReadme) {
+      stageFile(tempDir, "README.md", log);
+    }
     stageFile(tempDir, englishReadmeName, log);
 
     // Step 5: Commit
     log.info("── Commit ──");
+    const commitMsg = generatedChineseReadme
+      ? "docs: add Chinese and English README"
+      : "docs: add English README";
     commit(
       tempDir,
-      "docs: add English README",
+      commitMsg,
       "AI-assisted English README generation. Human-reviewed before submission.\n\n" +
         "Evidence extracted from:\n- package.json\n- Source files\n- Existing documentation\n\n" +
         `Generated by RepoPassport (run: ${runId})`,
@@ -636,6 +668,7 @@ async function saveDraftLocally(
   generatedReadme: string,
   facts: RepoFacts,
   evidenceMap: ContentEvidenceMap[],
+  chineseReadme: string | undefined,
   log: Logger,
 ): Promise<string> {
   const baseDir = join(homedir(), ".repopassport", "drafts");
@@ -645,6 +678,9 @@ async function saveDraftLocally(
   const draftPath = join(baseDir, `${draftId}`);
   await mkdir(draftPath, { recursive: true });
 
+  if (chineseReadme) {
+    await writeFile(join(draftPath, "README.md"), chineseReadme, "utf-8");
+  }
   await writeFile(join(draftPath, "README.en.md"), generatedReadme, "utf-8");
   await writeFile(join(draftPath, "facts.json"), JSON.stringify(facts, null, 2), "utf-8");
   await writeFile(join(draftPath, "evidence.json"), JSON.stringify(evidenceMap, null, 2), "utf-8");
