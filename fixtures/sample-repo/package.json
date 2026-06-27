@@ -1,0 +1,27 @@
+{
+  "name": "sample-lib",
+  "version": "1.0.0",
+  "description": "一个轻量级 TypeScript 工具库，提供字符串处理、数组操作和校验助手",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest run"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.0.0",
+    "vitest": "^1.0.0"
+  },
+  "keywords": ["utils", "typescript", "utilities"],
+  "license": "MIT"
+}
