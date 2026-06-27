@@ -27,9 +27,16 @@ export class GiteeAdapter implements PlatformAdapter {
   private readonly apiBase = "https://gitee.com/api/v5";
 
   parseRepoUrl(url: string): ParsedRepoUrl | null {
-    const match = url.match(
+    // HTTPS: https://gitee.com/owner/repo 或 https://gitee.com/owner/repo.git
+    let match = url.match(
       /^https?:\/\/gitee\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/,
     );
+    // SSH: git@gitee.com:owner/repo.git
+    if (!match) {
+      match = url.match(
+        /^git@gitee\.com:([^/]+)\/([^/]+?)(?:\.git)?$/,
+      );
+    }
     if (!match) return null;
     return {
       platform: "gitee",

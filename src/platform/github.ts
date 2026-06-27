@@ -22,9 +22,16 @@ export class GitHubAdapter implements PlatformAdapter {
   readonly displayName = "GitHub";
 
   parseRepoUrl(url: string): ParsedRepoUrl | null {
-    const match = url.match(
+    // HTTPS: https://github.com/owner/repo 或 https://github.com/owner/repo.git
+    let match = url.match(
       /^https?:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/,
     );
+    // SSH: git@github.com:owner/repo.git
+    if (!match) {
+      match = url.match(
+        /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?$/,
+      );
+    }
     if (!match) return null;
     return {
       platform: "github",

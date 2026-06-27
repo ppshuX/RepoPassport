@@ -30,6 +30,8 @@ export class ACGitAdapter implements PlatformAdapter {
   private static readonly URL_PATTERNS = [
     /^https?:\/\/git\.woa\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/,
     /^https?:\/\/git\.code\.tencent\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/,
+    /^git@git\.woa\.com:([^/]+)\/([^/]+?)(?:\.git)?$/,
+    /^git@git\.code\.tencent\.com:([^/]+)\/([^/]+?)(?:\.git)?$/,
   ];
 
   parseRepoUrl(url: string): ParsedRepoUrl | null {
