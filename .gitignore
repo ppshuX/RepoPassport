@@ -3,6 +3,7 @@ node_modules/
 
 # Build output
 dist/
+client/dist/
 
 # TypeScript
 *.tsbuildinfo
@@ -29,6 +30,9 @@ npm-debug.log*
 
 # CodeBuddy IDE runtime
 .codebuddy/
+
+# Temporary test / sampling artifacts
+.tmp/
 
 # Local Git worktrees
 .worktrees/

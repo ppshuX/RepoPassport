@@ -64,7 +64,7 @@ describe("Dry-run 集成测试 (Mock Provider)", () => {
 
   it("Step 2: 收集高价值文件", async () => {
     const result = await cloneRepo(repoUrl, log);
-    const files = await collectFiles(result.tempDir, log);
+    const { files } = await collectFiles(result.tempDir, log);
 
     expect(files.length).toBeGreaterThanOrEqual(3);
 
@@ -83,7 +83,7 @@ describe("Dry-run 集成测试 (Mock Provider)", () => {
 
   it("Step 3-4: 事实提取 + 文档生成 (Mock Provider)", async () => {
     const cloneResult = await cloneRepo(repoUrl, log);
-    const files = await collectFiles(cloneResult.tempDir, log);
+    const { files } = await collectFiles(cloneResult.tempDir, log);
     const provider = new MockProvider();
 
     const facts = await extractFacts(files, cloneResult.meta, provider, log);
@@ -112,7 +112,7 @@ describe("Dry-run 集成测试 (Mock Provider)", () => {
 
   it("Step 5: 证据报告生成", async () => {
     const cloneResult = await cloneRepo(repoUrl, log);
-    const files = await collectFiles(cloneResult.tempDir, log);
+    const { files } = await collectFiles(cloneResult.tempDir, log);
     const provider = new MockProvider();
     const facts = await extractFacts(files, cloneResult.meta, provider, log);
     const generatedReadme = await generateReadme(facts, undefined, provider, log);
@@ -128,7 +128,7 @@ describe("Dry-run 集成测试 (Mock Provider)", () => {
 
   it("Step 6: Diff 预览", async () => {
     const cloneResult = await cloneRepo(repoUrl, log);
-    const files = await collectFiles(cloneResult.tempDir, log);
+    const { files } = await collectFiles(cloneResult.tempDir, log);
     const provider = new MockProvider();
     const facts = await extractFacts(files, cloneResult.meta, provider, log);
     const generatedReadme = await generateReadme(facts, undefined, provider, log);
@@ -145,7 +145,7 @@ describe("Dry-run 集成测试 (Mock Provider)", () => {
     const cloneResult = await cloneRepo(repoUrl, log);
     expect(existsSync(cloneResult.tempDir)).toBe(true);
 
-    const files = await collectFiles(cloneResult.tempDir, log);
+    const { files } = await collectFiles(cloneResult.tempDir, log);
     expect(files.length).toBeGreaterThanOrEqual(3);
 
     const provider = new MockProvider();

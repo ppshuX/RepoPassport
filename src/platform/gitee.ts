@@ -146,8 +146,21 @@ export class GiteeAdapter implements PlatformAdapter {
     return token;
   }
 
+  /** 校验 owner/repo 名称安全 */
+  private static readonly SAFE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/;
+
+  private assertSafeName(value: string, label: string): void {
+    if (!GiteeAdapter.SAFE_NAME.test(value)) {
+      throw new Error(`不允许的${label}: "${value}"`);
+    }
+  }
+
   /** Gitee API GET 请求（使用 curl，避免 Node fetch 兼容性问题） */
   private apiGet(url: string, log: Logger): string {
+    // 安全：仅允许 HTTPS Gitee API URL
+    if (!url.startsWith("https://gitee.com/api/v5/")) {
+      throw new Error(`不允许的 URL: ${url}`);
+    }
     log.verbose(`GET ${url.replace(/access_token=[^&]+/, "access_token=***")}`);
     return execSync(`curl -sS "${url}"`, {
       encoding: "utf-8",
@@ -158,12 +171,16 @@ export class GiteeAdapter implements PlatformAdapter {
 
   /** Gitee API POST 请求 */
   private apiPost(url: string, payload: Record<string, unknown>, log: Logger): string {
+    // 安全：仅允许 HTTPS Gitee API URL
+    if (!url.startsWith("https://gitee.com/api/v5/")) {
+      throw new Error(`不允许的 URL: ${url}`);
+    }
     const safePayload = { ...payload, access_token: "***" };
     log.verbose(`POST ${url} ${JSON.stringify(safePayload)}`);
 
     // 用 URL 编码形式发送（Gitee API 接受 form-encoded）
     const params = Object.entries(payload)
-      .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+      .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
       .join("&");
 
     return execSync(

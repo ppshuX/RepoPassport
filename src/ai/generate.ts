@@ -10,10 +10,11 @@ export async function generateReadme(
   originalReadme: string | undefined,
   provider: Provider,
   log: Logger,
+  languages?: string[],
 ): Promise<string> {
   log.info("生成英文 README 草稿...");
 
-  const systemPrompt = buildGenerateSystemPrompt();
+  const systemPrompt = buildGenerateSystemPrompt(languages);
   const userPrompt = buildGenerateUserPrompt(facts, originalReadme);
 
   const response = await provider.chatCompletion([
@@ -27,13 +28,17 @@ export async function generateReadme(
   return readme;
 }
 
-function buildGenerateSystemPrompt(): string {
-  return `You are a technical writer creating an English README for an open-source project.
+function buildGenerateSystemPrompt(languages?: string[]): string {
+  const langNote = languages && languages.length > 0
+    ? `\nThis project uses: ${languages.join(", ")}. Use ecosystem-appropriate conventions in the README (e.g., pip/poetry for Python, go get for Go, cargo for Rust, maven/gradle for Java).`
+    : "";
+
+  return `You are a technical writer creating an English README for an open-source project.${langNote}
 
 CRITICAL RULES:
 1. ONLY write content supported by the provided RepoFacts. No evidence = do not write.
-2. Installation instructions based on package.json scripts and dependencies. Do not invent commands.
-3. Tech stack descriptions use real package names from package.json.
+2. Installation instructions based on actual build system (npm/pip/cargo/go/maven) found in the facts.
+3. Tech stack descriptions use real package/dependency names from config files.
 4. Usage examples ONLY when actual API patterns are found in source code.
 5. Do NOT fabricate "Contributing Guide", "Code of Conduct", or similar sections.
 6. Do NOT add "Star History", "License Badge", or decorative elements.
@@ -52,11 +57,11 @@ Template (only include sections with evidence):
 
 ## Tech Stack
 
-{tech stack from package.json}
+{tech stack from config files}
 
 ## Installation
 
-{installation steps from package.json scripts and README}
+{installation steps from build scripts and README}
 
 ## Usage
 
@@ -68,7 +73,7 @@ Template (only include sections with evidence):
 
 ## License
 
-{license from LICENSE file or package.json, omit if not found}`;
+{license from LICENSE file or config, omit if not found}`;
 }
 
 function buildGenerateUserPrompt(
@@ -108,10 +113,11 @@ export async function generateChineseReadme(
   facts: RepoFacts,
   provider: Provider,
   log: Logger,
+  languages?: string[],
 ): Promise<string> {
   log.info("生成中文 README 草稿...");
 
-  const systemPrompt = buildChineseGenerateSystemPrompt();
+  const systemPrompt = buildChineseGenerateSystemPrompt(languages);
   const userPrompt = buildChineseGenerateUserPrompt(facts);
 
   const response = await provider.chatCompletion([
@@ -125,13 +131,17 @@ export async function generateChineseReadme(
   return readme;
 }
 
-function buildChineseGenerateSystemPrompt(): string {
-  return `你是一名技术文档作者，为开源项目编写中文 README。
+function buildChineseGenerateSystemPrompt(languages?: string[]): string {
+  const langNote = languages && languages.length > 0
+    ? `\n此项目使用: ${languages.join("、")}。在 README 中使用对应生态的惯例（如 Python 用 pip/poetry，Go 用 go get，Rust 用 cargo，Java 用 maven/gradle）。`
+    : "";
+
+  return `你是一名技术文档作者，为开源项目编写中文 README。${langNote}
 
 关键规则：
 1. 只写 RepoFacts 中有证据支持的内容。没有证据 = 不写。
-2. 安装说明基于 package.json 的 scripts 和 dependencies。不要编造命令。
-3. 技术栈描述使用 package.json 中的真实包名。
+2. 安装说明基于实际的构建系统（npm/pip/cargo/go/maven）中的配置。
+3. 技术栈描述使用配置文件中的真实包名/依赖名。
 4. 使用示例仅当在源代码中找到实际 API 模式时才写。
 5. 不要编造"贡献指南"、"行为准则"等章节。
 6. 不要添加"Star History"、"License Badge"等装饰元素。
@@ -150,11 +160,11 @@ function buildChineseGenerateSystemPrompt(): string {
 
 ## 技术栈
 
-{来自 package.json 的技术栈}
+{来自配置文件的技术栈}
 
 ## 安装
 
-{基于 package.json scripts 的安装步骤}
+{基于构建脚本的安装步骤}
 
 ## 使用方法
 
@@ -166,7 +176,7 @@ function buildChineseGenerateSystemPrompt(): string {
 
 ## 许可证
 
-{来自 LICENSE 文件或 package.json，找不到则省略}`;
+{来自 LICENSE 文件或配置文件，找不到则省略}`;
 }
 
 function buildChineseGenerateUserPrompt(facts: RepoFacts): string {

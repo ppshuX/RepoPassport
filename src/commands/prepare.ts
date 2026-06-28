@@ -1,61 +1,58 @@
-import { cloneRepo, isLocalRepo } from "../repo/clone.js";
-import { cleanupTempDir } from "../repo/cleanup.js";
-import { collectFiles } from "../repo/files.js";
-import { createProvider, MockProvider } from "../ai/client.js";
-import { extractFacts } from "../ai/extract.js";
-import { generateReadme, generateChineseReadme } from "../ai/generate.js";
-import { buildContentEvidenceMap, formatEvidenceReport } from "../evidence/report.js";
-import { showNewFileDiff, showDiff } from "../utils/diff.js";
-import { createLogger } from "../utils/log.js";
-import type { Logger } from "../utils/log.js";
-import type { PrepareOptions, ProviderConfig } from "../types/config.js";
-import type { Provider } from "../ai/client.js";
-import type { RepoFacts, FileContent, RepoMeta } from "../types/facts.js";
-import type { GenerationRun, ContentEvidenceMap, SubmitRecoveryInfo } from "../types/run.js";
-import { detectPlatform } from "../platform/index.js";
-import type { PlatformAdapter, PlatformType } from "../platform/index.js";
-import {
-  addForkRemote,
-  removeForkRemote,
-  createBranch,
-  currentBranch,
-  defaultBranch,
-  stageFile,
-  commit,
-  pushBranch,
-  execGit,
-} from "../pr/git.js";
-import { saveRun, savePrRecord } from "../store/runs.js";
-import { v4 as uuid } from "uuid";
-import { writeFile, mkdir } from "node:fs/promises";
-import { join, basename } from "node:path";
-import { homedir } from "node:os";
-import * as readline from "node:readline";
-import { execSync } from "node:child_process";
-
 /**
- * prepare 命令主流程。
+ * prepare 命令 — CLI 适配层。
+ *
+ * 调用 runPipeline() 执行分析管线，通过 onEvent 推送终端进度。
+ * 展示 Diff、证据报告，处理用户交互（y/n/d 或提交确认）。
  *
  * 安全约束：
  * - 默认 Dry-run，绝不执行 Git 写操作。
  * - 只有 --submit 且用户输入完整确认文本后才进入提交。
  */
+import { cleanupTempDir } from "../repo/cleanup.js";
+import { showNewFileDiff, showDiff } from "../utils/diff.js";
+import { formatEvidenceReport } from "../evidence/report.js";
+import { createConsoleLogger } from "../utils/log.js";
+import type { Logger } from "../utils/log.js";
+import type { PrepareOptions } from "../types/config.js";
+import type { RepoFacts, FileContent, RepoMeta } from "../types/facts.js";
+import type { GenerationRun, ContentEvidenceMap } from "../types/run.js";
+import { saveRun } from "../store/runs.js";
+import { runPipeline } from "../pipeline/pipeline.js";
+import type { PipelineEvent, PipelineResult } from "../pipeline/pipeline.js";
+import { submitChanges } from "../services/submit.js";
+import { v4 as uuid } from "uuid";
+import { writeFile, mkdir } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
+import * as readline from "node:readline";
+
+/**
+ * prepare 命令主流程。
+ */
 export async function prepareCommand(
   repoUrl: string,
   options: PrepareOptions,
 ): Promise<void> {
-  const log = createLogger(options.verbose);
+  const log = createConsoleLogger(options.verbose);
   const runId = uuid();
+  const events: PipelineEvent[] = [];
 
-  // ── 0. 检测平台 ──
-  const { adapter } = detectPlatform(repoUrl);
-  const platform = adapter.type;
-  log.info(`检测到平台: ${adapter.displayName}`);
+  const onEvent = (event: PipelineEvent) => {
+    events.push(event);
+    // 只打印关键进度信息
+    if (event.type === "step:start" && event.message) {
+      log.info(event.message);
+    } else if (event.type === "progress" && event.message) {
+      log.verbose(event.message);
+    } else if (event.type === "step:complete" && event.message) {
+      log.info(event.message);
+    }
+  };
 
   const run: GenerationRun = {
     id: runId,
     repoUrl,
-    platform,
+    platform: "github",
     startedAt: new Date().toISOString(),
     steps: {
       clone: { status: "pending" },
@@ -66,146 +63,89 @@ export async function prepareCommand(
     },
   };
 
-  let tempDir: string | undefined;
+  let pipelineResult: PipelineResult | null = null;
 
   try {
-    // ── 1. 前置检查 ──
+    // ── 前置检查 ──
     log.info("检查前置条件...");
-    checkGitAvailable(log);
 
     // 只有 --submit 模式才检查平台前置条件
     if (options.submit) {
+      const { detectPlatform } = await import("../platform/index.js");
+      const { adapter } = detectPlatform(repoUrl);
       adapter.checkPrerequisites(log);
     }
 
-    // ── 2. 克隆与分析 ──
-    run.steps.clone = { status: "running", startedAt: new Date().toISOString() };
-    const cloneResult = await cloneRepo(repoUrl, log);
-    tempDir = cloneResult.tempDir;
-    run.steps.clone = { status: "completed", completedAt: new Date().toISOString() };
+    // ── 运行分析管线 ──
+    pipelineResult = await runPipeline({
+      repoUrl,
+      provider: options.provider as "openai" | "mock",
+      model: options.model,
+      onEvent,
+      log,
+    });
 
-    const files = await collectFiles(tempDir, log);
-    log.info(`共收集 ${files.length} 个文件`);
+    // 更新步骤状态
+    run.platform = pipelineResult.platform;
+    const now = new Date().toISOString();
+    run.steps.clone = { status: "completed", completedAt: now };
+    run.steps.extract = { status: "completed", completedAt: now };
+    run.steps.generate = { status: "completed", completedAt: now };
 
-    const originalReadme = files.find(
-      (f) => f.path.endsWith("/README.md") || f.path.endsWith("\\README.md"),
-    )?.content;
+    const {
+      cloneResult,
+      files,
+      facts,
+      evidenceMap,
+      filteredReadme,
+      chineseReadme,
+      originalReadme,
+      adapter,
+    } = pipelineResult;
 
-    // ── 3. 事实提取 ──
-    run.steps.extract = { status: "running", startedAt: new Date().toISOString() };
-    const provider = createProviderFromOptions(options);
-    const facts = await extractFacts(files, cloneResult.meta, provider, log);
-    run.steps.extract = { status: "completed", completedAt: new Date().toISOString() };
-
-    // ── 4. 文档生成 ──
-    run.steps.generate = { status: "running", startedAt: new Date().toISOString() };
-
-    // 如果没有 README.md，先生成中文 README
-    let generatedChineseReadme: string | undefined;
-    if (!originalReadme) {
-      generatedChineseReadme = await generateChineseReadme(facts, provider, log);
-    }
-
-    const generatedReadme = await generateReadme(facts, originalReadme, provider, log);
-    run.steps.generate = { status: "completed", completedAt: new Date().toISOString() };
-
-    // ── 5. 构建内容证据映射 ──
-    const contentEvidenceMap = buildContentEvidenceMap(generatedReadme, facts);
-    const filteredReadme = filterReadmeByEvidence(generatedReadme, contentEvidenceMap);
-
-    // ── 6. 展示审核界面 ──
+    // ── 展示审核界面 ──
     run.steps.review = { status: "running", startedAt: new Date().toISOString() };
 
     const targetRepo = `${cloneResult.meta.owner}/${cloneResult.meta.name}`;
-    const isDual = !originalReadme && !!generatedChineseReadme;
-
+    const isDual = !originalReadme && !!chineseReadme;
     const title = isDual ? "中英文 README 草稿" : "英文 README 草稿";
-    console.log("\n" + "═".repeat(72));
-    console.log(`  RepoPassport — ${title}`);
-    console.log("═".repeat(72));
-    console.log(`  仓库: ${targetRepo}`);
-    console.log(`  平台: ${adapter.displayName}`);
-    console.log(`  Commit: ${cloneResult.meta.commitSha.slice(0, 7)}`);
-    console.log(`  Provider: ${options.provider}`);
-    console.log(`  模式: ${options.submit ? "提交模式 (--submit)" : "Dry-run (仅预览，无 Git 写操作)"}`);
-    if (isDual) {
-      console.log(`  生成: README.md (中文) + README.en.md (英文)`);
+
+    // --output: 写入文件
+    if (options.output) {
+      const outDir = resolve(options.output);
+      await mkdir(join(outDir, ".."), { recursive: true }).catch(() => {});
+      if (chineseReadme) {
+        await writeFile(outDir, chineseReadme, "utf-8");
+        log.info(`中文 README 已写入: ${outDir}`);
+      }
+      const enPath = outDir.replace(/(\.md)?$/i, ".en.md");
+      await writeFile(enPath, filteredReadme, "utf-8");
+      log.info(`英文 README 已写入: ${enPath}`);
     }
-    console.log("═".repeat(72));
+
+    displayHeader(title, targetRepo, adapter.displayName, cloneResult.meta, options, isDual);
 
     const existingEnReadme = detectEnglishReadme(files);
 
-    // 显示 Diff — 中文 README
-    if (generatedChineseReadme) {
-      console.log("\n── Diff 预览 [README.md] ──\n");
-      console.log(showNewFileDiff(generatedChineseReadme, "README.md"));
-    }
-
-    // 显示 Diff — 英文 README
-    console.log(`\n── Diff 预览 [README.en.md] ──\n`);
-    if (existingEnReadme) {
-      console.log(showDiff(existingEnReadme.content, filteredReadme, existingEnReadme.path));
-    } else {
-      console.log(showNewFileDiff(filteredReadme, "README.en.md"));
-    }
+    // 显示 Diff
+    displayDiffs(chineseReadme, filteredReadme, existingEnReadme);
 
     // 显示证据报告
-    console.log("\n" + formatEvidenceReport(facts, contentEvidenceMap));
+    console.log("\n" + formatEvidenceReport(facts, evidenceMap));
 
-    // ── 7. 交互式确认 ──
+    // ── 交互式确认 ──
     if (options.submit) {
-      // ── 提交模式：必须输入确认文本 ──
-      const submitConfirmed = await promptSubmitConfirmation(targetRepo, log);
-
-      if (!submitConfirmed) {
-        console.log("\n确认文本不匹配，已取消提交。");
-        run.steps.review = { status: "skipped" };
-        run.completedAt = new Date().toISOString();
-        await saveRun(run, log);
-      } else {
-        // 先存草稿
-        const draftPath = await saveDraftLocally(
-          runId, cloneResult.meta, filteredReadme, facts, contentEvidenceMap, generatedChineseReadme, log,
-        );
-        console.log(`\n草稿已保存: ${draftPath}`);
-        run.draftId = runId;
-        run.steps.review = { status: "completed", completedAt: new Date().toISOString() };
-
-        // 执行提交
-        await submitChanges({
-          run,
-          runId,
-          tempDir: tempDir!,
-          cloneResult,
-          adapter,
-          platform,
-          options,
-          filteredReadme,
-          generatedChineseReadme,
-          files,
-          log,
-        });
-      }
+      await handleSubmitMode({
+        run, runId, pipelineResult, targetRepo, filteredReadme,
+        chineseReadme, files, facts, evidenceMap, cloneResult,
+        adapter, platform: pipelineResult.platform, log,
+      });
     } else {
-      // ── Dry-run 模式：y/n/d 交互 ──
-      const choice = await promptUser();
-
-      if (choice === "n") {
-        console.log("\n已取消，清理中...");
-        run.steps.review = { status: "skipped" };
-        run.completedAt = new Date().toISOString();
-        await saveRun(run, log);
-      } else {
-        const draftPath = await saveDraftLocally(
-          runId, cloneResult.meta, filteredReadme, facts, contentEvidenceMap, generatedChineseReadme, log,
-        );
-        console.log(`\n[Dry-run] 草稿已保存: ${draftPath}`);
-        console.log("[Dry-run] 未执行任何 Git 写操作、未创建 Fork 或 PR。");
-        run.draftId = runId;
-        run.steps.review = { status: "completed", completedAt: new Date().toISOString() };
-        run.completedAt = new Date().toISOString();
-        await saveRun(run, log);
-      }
+      await handleDryRunMode({
+        run, runId, pipelineResult, targetRepo, filteredReadme,
+        chineseReadme, files, facts, evidenceMap, cloneResult, log,
+        yes: options.yes,
+      });
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -213,7 +153,7 @@ export async function prepareCommand(
 
     const ts = new Date().toISOString();
     for (const key of ["clone", "extract", "generate", "review"] as const) {
-      if (run.steps[key].status === "running") {
+      if (run.steps[key].status === "running" || run.steps[key].status === "pending") {
         run.steps[key] = { status: "failed", error: sanitizeForOutput(msg), at: ts };
       }
     }
@@ -227,206 +167,148 @@ export async function prepareCommand(
 
     process.exitCode = 1;
   } finally {
-    if (tempDir) {
-      await cleanupTempDir(tempDir, log);
+    if (pipelineResult?.cloneResult?.tempDir) {
+      await cleanupTempDir(pipelineResult.cloneResult.tempDir, log);
     }
   }
 }
 
 // ────────────────────────────────────────────
-//  提交子流程（仅在 --submit 且确认后进入）
+//  交互处理
 // ────────────────────────────────────────────
+
+interface DryRunContext {
+  run: GenerationRun;
+  runId: string;
+  pipelineResult: PipelineResult;
+  targetRepo: string;
+  filteredReadme: string;
+  chineseReadme?: string;
+  files: FileContent[];
+  facts: RepoFacts;
+  evidenceMap: ContentEvidenceMap[];
+  cloneResult: { tempDir: string; meta: RepoMeta };
+  log: Logger;
+  yes: boolean;
+}
+
+async function handleDryRunMode(ctx: DryRunContext): Promise<void> {
+  const { run, runId, cloneResult, filteredReadme, facts, evidenceMap, chineseReadme, log, yes } = ctx;
+  let save = false;
+
+  if (yes) {
+    console.log("\n[--yes] 自动保存草稿...");
+    save = true;
+  } else {
+    const choice = await promptUser();
+    if (choice === "n") {
+      console.log("\n已取消，清理中...");
+      run.steps.review = { status: "skipped" };
+      run.completedAt = new Date().toISOString();
+      await saveRun(run, log);
+    } else {
+      save = true;
+    }
+  }
+
+  if (save) {
+    const draftPath = await saveDraftLocally(
+      runId, cloneResult.meta, filteredReadme, facts, evidenceMap, chineseReadme, log,
+    );
+    console.log(`\n[Dry-run] 草稿已保存: ${draftPath}`);
+    console.log("[Dry-run] 未执行任何 Git 写操作、未创建 Fork 或 PR。");
+    run.draftId = runId;
+    run.steps.review = { status: "completed", completedAt: new Date().toISOString() };
+    run.completedAt = new Date().toISOString();
+    await saveRun(run, log);
+  }
+}
 
 interface SubmitContext {
   run: GenerationRun;
   runId: string;
-  tempDir: string;
-  cloneResult: { tempDir: string; meta: RepoMeta };
-  adapter: PlatformAdapter;
-  platform: PlatformType;
-  options: PrepareOptions;
+  pipelineResult: PipelineResult;
+  targetRepo: string;
   filteredReadme: string;
-  generatedChineseReadme?: string;
+  chineseReadme?: string;
   files: FileContent[];
+  facts: RepoFacts;
+  evidenceMap: ContentEvidenceMap[];
+  cloneResult: { tempDir: string; meta: RepoMeta };
+  adapter: PipelineResult["adapter"];
+  platform: PipelineResult["platform"];
   log: Logger;
 }
 
-async function submitChanges(ctx: SubmitContext): Promise<void> {
-  const { run, runId, tempDir, cloneResult, adapter, platform, filteredReadme, generatedChineseReadme, files, log } = ctx;
-  const targetRepo = `${cloneResult.meta.owner}/${cloneResult.meta.name}`;
+async function handleSubmitMode(ctx: SubmitContext): Promise<void> {
+  const {
+    run, runId, pipelineResult, targetRepo, filteredReadme,
+    chineseReadme, files, facts, evidenceMap, cloneResult,
+    adapter, platform, log,
+  } = ctx;
 
-  run.steps.submit = { status: "running", startedAt: new Date().toISOString() };
+  const submitConfirmed = await promptSubmitConfirmation(targetRepo, log);
 
-  // 确定文件名
-  const existingEn = detectEnglishReadme(files);
-  const englishReadmeName = existingEn ? basename(existingEn.path) : "README.en.md";
-
-  // 写中文 README（如有）
-  if (generatedChineseReadme) {
-    await writeFile(join(tempDir, "README.md"), generatedChineseReadme, "utf-8");
-    log.info("中文 README.md 已写入临时目录");
+  if (!submitConfirmed) {
+    console.log("\n确认文本不匹配，已取消提交。");
+    run.steps.review = { status: "skipped" };
+    run.completedAt = new Date().toISOString();
+    await saveRun(run, log);
+    return;
   }
 
-  // 在临时克隆目录中写入英文 README
-  const targetPath = join(tempDir, englishReadmeName);
-  await writeFile(targetPath, filteredReadme, "utf-8");
+  // 先存草稿
+  const draftPath = await saveDraftLocally(
+    runId, cloneResult.meta, filteredReadme, facts, evidenceMap, chineseReadme, log,
+  );
+  console.log(`\n草稿已保存: ${draftPath}`);
+  run.draftId = runId;
+  run.steps.review = { status: "completed", completedAt: new Date().toISOString() };
 
-  let forkUrl: string | undefined;
-  let forkOwner: string | undefined;
-  let branchName = "";
-  const originalBranch = defaultBranch(tempDir, log);
+  // 执行提交
+  run.steps.submit = { status: "running", startedAt: new Date().toISOString() };
 
-  // 恢复信息积累
-  const recoveryInfo: SubmitRecoveryInfo = {
-    failedAt: "fork",
-    remoteResources: {},
-    recoveryCommands: [],
-  };
+  const submitResult = await submitChanges({
+    runId,
+    tempDir: pipelineResult.cloneResult.tempDir,
+    platform,
+    adapter,
+    cloneResult,
+    filteredReadme,
+    generatedChineseReadme: chineseReadme,
+    files,
+    log,
+    onEvent: (event) => {
+      if (event.type === "step:complete" && event.step === "submit") {
+        console.log(`\n✅ Draft PR 已创建: ${event.data && typeof event.data === "object" && "prUrl" in event.data ? (event.data as Record<string, unknown>).prUrl : ""}`);
+      }
+    },
+  });
 
-  try {
-    // Step 1: Fork
-    log.info("── Fork 仓库 ──");
-    const forkResult = await adapter.forkRepo(cloneResult.meta.owner, cloneResult.meta.name, log);
-    forkUrl = forkResult.forkUrl;
-    forkOwner = forkResult.forkOwner;
-    recoveryInfo.remoteResources.forkUrl = forkUrl;
-    recoveryInfo.remoteResources.forkOwner = forkOwner;
-
-    // Step 2: 添加 remote
-    log.info("── 添加 Fork Remote ──");
-    addForkRemote(tempDir, forkResult.forkUrl, log);
-
-    // Step 3: 创建分支（检测重复分支，避免冲突）
-    recoveryInfo.failedAt = "branch";
-    log.info("── 创建分支 ──");
-    createBranch(tempDir, "repopassport/en-readme", log);
-    branchName = currentBranch(tempDir, log);
-    recoveryInfo.remoteResources.branchName = branchName;
-
-    // Step 4: Stage
-    recoveryInfo.failedAt = "commit";
-    log.info("── Stage 文件 ──");
-    if (generatedChineseReadme) {
-      stageFile(tempDir, "README.md", log);
-    }
-    stageFile(tempDir, englishReadmeName, log);
-
-    // Step 5: Commit
-    log.info("── Commit ──");
-    const commitMsg = generatedChineseReadme
-      ? "docs: add Chinese and English README"
-      : "docs: add English README";
-    commit(
-      tempDir,
-      commitMsg,
-      "AI-assisted English README generation. Human-reviewed before submission.\n\n" +
-        "Evidence extracted from:\n- package.json\n- Source files\n- Existing documentation\n\n" +
-        `Generated by RepoPassport (run: ${runId})`,
-      log,
-    );
-
-    // Step 6: Push
-    recoveryInfo.failedAt = "push";
-    log.info("── Push 到 Fork ──");
-    pushBranch(tempDir, "repopassport-fork", branchName, log);
-    recoveryInfo.remoteResources.remotePushed = true;
-
-    // Step 7: 创建 Draft PR
-    recoveryInfo.failedAt = "pr_create";
-    log.info("── 创建 Draft PR ──");
-    const prResult = await adapter.createDraftPr(
-      {
-        targetOwner: cloneResult.meta.owner,
-        targetRepo: cloneResult.meta.name,
-        baseBranch: cloneResult.meta.defaultBranch,
-        headUser: forkOwner,
-        headBranch: branchName,
-        title: "docs: add English README",
-        body:
-          "## Summary\n\n" +
-          "AI-assisted English README generation. Human-reviewed before submission.\n\n" +
-          "## What Changed\n\n" +
-          `- Added ${englishReadmeName} (English README)\n` +
-          "- Original Chinese README.md preserved\n\n" +
-          "Evidence extracted from:\n" +
-          "- package.json\n- Source files\n- Existing documentation\n\n" +
-          `Generated by RepoPassport (run: ${runId})`,
-      },
-      log,
-    );
-
-    // Step 8: 保存 PR 记录
-    recoveryInfo.failedAt = "pr_record";
-    const prRecordId = uuid();
-    await savePrRecord(
-      {
-        id: prRecordId,
-        runId,
-        platform,
-        prUrl: prResult.prUrl,
-        targetRepo,
-        forkUrl,
-        branchName,
-        createdAt: new Date().toISOString(),
-        status: "open",
-        lastCheckedAt: new Date().toISOString(),
-      },
-      log,
-    );
-
-    run.prRecordId = prRecordId;
+  if (submitResult.success && submitResult.prUrl) {
+    console.log(`   使用 repopassport status ${submitResult.prUrl} 查询状态`);
+    run.prRecordId = submitResult.prRecordId;
     run.steps.submit = { status: "completed", completedAt: new Date().toISOString() };
     run.recoveryInfo = undefined;
+  } else if (submitResult.partialFailure) {
+    run.steps.submit = {
+      status: "partial_failure",
+      error: submitResult.error ?? "未知错误",
+      at: new Date().toISOString(),
+    };
+    run.recoveryInfo = submitResult.recoveryInfo;
 
-    console.log(`\n✅ Draft PR 已创建: ${prResult.prUrl}`);
-    console.log(`   使用 repopassport status ${prResult.prUrl} 查询状态`);
-
-  } catch (submitErr) {
-    const msg = submitErr instanceof Error ? submitErr.message : String(submitErr);
-    log.error(`提交失败: ${sanitizeForOutput(msg)}`);
-
-    // 本地清理（只清理本地资源）
-    await rollbackLocal(tempDir, branchName, originalBranch, forkUrl, log);
-
-    // 构建恢复信息
-    recoveryInfo.recoveryCommands = buildRecoveryCommands(
-      recoveryInfo,
-      targetRepo,
-      cloneResult.meta.defaultBranch,
-      branchName,
-      forkOwner,
-    );
-
-    // 判定失败类型
-    const isPartialFailure = recoveryInfo.remoteResources.forkUrl !== undefined ||
-      recoveryInfo.remoteResources.remotePushed === true;
-
-    if (isPartialFailure) {
-      run.steps.submit = {
-        status: "partial_failure",
-        error: sanitizeForOutput(msg),
-        at: new Date().toISOString(),
-      };
-      run.recoveryInfo = recoveryInfo;
-
-      console.log("\n⚠️  部分操作已执行，远程资源未删除。恢复信息：");
-      console.log(`   失败步骤: ${recoveryInfo.failedAt}`);
-      if (recoveryInfo.remoteResources.forkUrl) {
-        console.log(`   Fork: ${recoveryInfo.remoteResources.forkUrl}`);
-      }
-      if (recoveryInfo.remoteResources.branchName) {
-        console.log(`   分支: ${recoveryInfo.remoteResources.branchName}`);
-      }
-      if (recoveryInfo.remoteResources.remotePushed) {
-        console.log(`   已 Push 到远程`);
-      }
-      console.log("\n   恢复命令（请手动执行）：");
-      for (const cmd of recoveryInfo.recoveryCommands) {
-        console.log(`   ${cmd}`);
-      }
-    } else {
-      run.steps.submit = { status: "failed", error: sanitizeForOutput(msg), at: new Date().toISOString() };
+    console.log("\n⚠️  部分操作已执行，远程资源未删除。恢复信息：");
+    if (submitResult.recoveryInfo) {
+      displayRecoveryInfo(submitResult.recoveryInfo);
     }
+    process.exitCode = 1;
+  } else {
+    run.steps.submit = {
+      status: "failed",
+      error: submitResult.error ?? "未知错误",
+      at: new Date().toISOString(),
+    };
     process.exitCode = 1;
   }
 
@@ -434,163 +316,76 @@ async function submitChanges(ctx: SubmitContext): Promise<void> {
   await saveRun(run, log);
 }
 
-/**
- * 本地回滚 — 只清理本地资源，绝不影响远程。
- */
-async function rollbackLocal(
-  cwd: string,
-  branchName: string | undefined,
-  originalBranch: string,
-  forkUrl: string | undefined,
-  log: Logger,
-): Promise<void> {
-  try {
-    if (branchName) {
-      try {
-        execGit(cwd, `checkout ${originalBranch}`, log);
-        execGit(cwd, `branch -D ${branchName}`, log);
-      } catch {
-        // 分支可能不存在
-      }
-    }
-    if (forkUrl) {
-      removeForkRemote(cwd, log);
-    }
-  } catch {
-    log.verbose("本地回滚过程中出现可忽略的错误");
-  }
-  log.info("本地回滚完成（远端资源未被触碰）");
-}
+// ────────────────────────────────────────────
+//  显示函数（CLI 专用）
+// ────────────────────────────────────────────
 
-/**
- * 根据失败阶段生成恢复命令。
- */
-function buildRecoveryCommands(
-  info: SubmitRecoveryInfo,
+function displayHeader(
+  title: string,
   targetRepo: string,
-  baseBranch: string,
-  branchName: string | undefined,
-  forkOwner: string | undefined,
-): string[] {
-  const cmds: string[] = [];
+  displayName: string,
+  meta: RepoMeta,
+  options: PrepareOptions,
+  isDual: boolean,
+): void {
+  console.log("\n" + "═".repeat(72));
+  console.log(`  RepoPassport — ${title}`);
+  console.log("═".repeat(72));
+  console.log(`  仓库: ${targetRepo}`);
+  console.log(`  平台: ${displayName}`);
+  console.log(`  Commit: ${meta.commitSha.slice(0, 7)}`);
+  console.log(`  Provider: ${options.provider}`);
+  console.log(`  模式: ${options.submit ? "提交模式 (--submit)" : "Dry-run (仅预览，无 Git 写操作)"}`);
+  if (isDual) {
+    console.log(`  生成: README.md (中文) + README.en.md (英文)`);
+  }
+  if (options.output) {
+    console.log(`  输出: ${options.output} / ${options.output.replace(/(\.md)?$/i, ".en.md")}`);
+  }
+  console.log("═".repeat(72));
+}
 
-  if (info.failedAt === "push" || info.failedAt === "pr_create" || info.failedAt === "pr_record") {
-    // Push 已成功，可以直接创建 PR
-    if (info.remoteResources.remotePushed && branchName && forkOwner) {
-      cmds.push(
-        `# Push 已完成，手动创建 PR（以 GitHub 为例）：\n` +
-        `# gh pr create --repo ${targetRepo} --base ${baseBranch} --head ${forkOwner}:${branchName} ` +
-        `--title "docs: add English README" --draft`,
-      );
-    }
+function displayDiffs(
+  chineseReadme: string | undefined,
+  filteredReadme: string,
+  existingEnReadme: FileContent | null,
+): void {
+  // 中文 README
+  if (chineseReadme) {
+    console.log("\n── Diff 预览 [README.md] ──\n");
+    console.log(showNewFileDiff(chineseReadme, "README.md"));
   }
 
-  if (info.failedAt === "pr_create" || info.failedAt === "pr_record") {
-    // PR 可能已创建但记录未保存
-    cmds.push(`# PR 可能已创建但本地记录失败，请在平台页面检查`);
+  // 英文 README
+  console.log(`\n── Diff 预览 [README.en.md] ──\n`);
+  if (existingEnReadme) {
+    console.log(showDiff(existingEnReadme.content, filteredReadme, existingEnReadme.path));
+  } else {
+    console.log(showNewFileDiff(filteredReadme, "README.en.md"));
   }
+}
 
-  if (info.failedAt === "fork" && info.remoteResources.forkUrl) {
-    cmds.push(
-      `# Fork 已创建但后续步骤失败，检查远程 Fork：\n` +
-      `# ${info.remoteResources.forkUrl}`,
-    );
+function displayRecoveryInfo(info: { failedAt: string; remoteResources: Record<string, unknown>; recoveryCommands: string[] }): void {
+  console.log(`   失败步骤: ${info.failedAt}`);
+  if (info.remoteResources.forkUrl) {
+    console.log(`   Fork: ${info.remoteResources.forkUrl}`);
   }
-
-  return cmds;
+  if (info.remoteResources.branchName) {
+    console.log(`   分支: ${info.remoteResources.branchName}`);
+  }
+  if (info.remoteResources.remotePushed) {
+    console.log(`   已 Push 到远程`);
+  }
+  console.log("\n   恢复命令（请手动执行）：");
+  for (const cmd of info.recoveryCommands) {
+    console.log(`   ${cmd}`);
+  }
 }
 
 // ────────────────────────────────────────────
-//  辅助函数
+//  交互函数（CLI 专用）
 // ────────────────────────────────────────────
 
-function createProviderFromOptions(options: PrepareOptions): Provider {
-  const providerName = options.provider || "mock";
-
-  if (providerName === "mock") {
-    return new MockProvider();
-  }
-
-  const apiKey = process.env["OPENAI_API_KEY"];
-  if (!apiKey) {
-    throw new Error(
-      "未找到 OPENAI_API_KEY 环境变量。\n" +
-        "请设置: export OPENAI_API_KEY=sk-...\n" +
-        "或使用 Mock Provider: --provider mock",
-    );
-  }
-
-  const config: ProviderConfig = {
-    provider: "openai",
-    model: options.model || "gpt-4o-mini",
-    apiKey,
-    baseURL: process.env["OPENAI_BASE_URL"],
-  };
-
-  return createProvider(config);
-}
-
-function checkGitAvailable(log: Logger): void {
-  try {
-    execSync("git --version", { stdio: "pipe" });
-    log.verbose("git 可用");
-  } catch {
-    throw new Error("未找到 git。请安装 git: https://git-scm.com");
-  }
-}
-
-function detectEnglishReadme(files: FileContent[]): FileContent | null {
-  const patterns = [/README\.en\.md/i, /README_EN\.md/i, /README-en\.md/i];
-  for (const f of files) {
-    const name = f.path.split(/[/\\]/).pop() || "";
-    if (patterns.some((p) => p.test(name))) {
-      return f;
-    }
-  }
-  return null;
-}
-
-function filterReadmeByEvidence(
-  readme: string,
-  evidenceMap: ContentEvidenceMap[],
-): string {
-  const noEvidenceSections = new Set(
-    evidenceMap.filter((s) => !s.hasEvidence).map((s) => s.section),
-  );
-
-  if (noEvidenceSections.size === 0) return readme;
-
-  const lines = readme.split("\n");
-  const filtered: string[] = [];
-  let skipping = false;
-
-  for (const line of lines) {
-    const h2Match = line.match(/^## (.+)/);
-    if (h2Match) {
-      const section = h2Match[1].trim();
-      if (noEvidenceSections.has(section)) {
-        skipping = true;
-        continue;
-      } else {
-        skipping = false;
-      }
-    }
-
-    if (skipping && line.startsWith("#") && !line.startsWith("## ")) {
-      skipping = false;
-    }
-
-    if (!skipping) {
-      filtered.push(line);
-    }
-  }
-
-  return filtered.join("\n");
-}
-
-/**
- * Dry-run 模式的 y/n/d 交互。
- */
 function promptUser(): Promise<"y" | "n" | "d"> {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -618,10 +413,6 @@ function promptUser(): Promise<"y" | "n" | "d"> {
   });
 }
 
-/**
- * --submit 模式的确认提示。
- * 必须输入完整的 "SUBMIT owner/repo" 文本才能继续。
- */
 async function promptSubmitConfirmation(
   targetRepo: string,
   log: Logger,
@@ -662,6 +453,21 @@ async function promptSubmitConfirmation(
   });
 }
 
+// ────────────────────────────────────────────
+//  工具函数
+// ────────────────────────────────────────────
+
+function detectEnglishReadme(files: FileContent[]): FileContent | null {
+  const patterns = [/README\.en\.md/i, /README_EN\.md/i, /README-en\.md/i];
+  for (const f of files) {
+    const name = f.path.split(/[/\\]/).pop() || "";
+    if (patterns.some((p) => p.test(name))) {
+      return f;
+    }
+  }
+  return null;
+}
+
 async function saveDraftLocally(
   runId: string,
   _repoMeta: RepoMeta,
@@ -674,8 +480,7 @@ async function saveDraftLocally(
   const baseDir = join(homedir(), ".repopassport", "drafts");
   await mkdir(baseDir, { recursive: true });
 
-  const draftId = runId;
-  const draftPath = join(baseDir, `${draftId}`);
+  const draftPath = join(baseDir, runId);
   await mkdir(draftPath, { recursive: true });
 
   if (chineseReadme) {
@@ -689,26 +494,19 @@ async function saveDraftLocally(
   return draftPath;
 }
 
-/**
- * 脱敏：将 API Key 和 Token 从错误消息中剔除。
- * 错误消息会输出到终端和日志，必须移除任何可能泄露的凭证。
- */
 function sanitizeForOutput(msg: string): string {
   let sanitized = msg;
 
-  // 移除 OPENAI_API_KEY 值
   const apiKey = process.env["OPENAI_API_KEY"];
   if (apiKey && apiKey.length > 4) {
     sanitized = sanitized.replaceAll(apiKey, "***REDACTED***");
   }
 
-  // 移除 GITEE_TOKEN 值
   const giteeToken = process.env["GITEE_TOKEN"];
   if (giteeToken && giteeToken.length > 4) {
     sanitized = sanitized.replaceAll(giteeToken, "***REDACTED***");
   }
 
-  // 移除通用的 Bearer/sk- 模式（防止通过命令行参数传入）
   sanitized = sanitized.replace(/sk-[a-zA-Z0-9]{20,}/g, "***REDACTED***");
   sanitized = sanitized.replace(/Bearer\s+[a-zA-Z0-9\-_+.]+/gi, "Bearer ***REDACTED***");
 

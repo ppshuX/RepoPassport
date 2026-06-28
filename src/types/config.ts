@@ -15,5 +15,6 @@ export interface PrepareOptions {
   submit: boolean;
   output?: string;
   verbose: boolean;
+  yes: boolean;
   platform?: PlatformType;
 }

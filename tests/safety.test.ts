@@ -99,29 +99,43 @@ describe("GenerationRun partial_failure 类型", () => {
 });
 
 describe("Git 操作函数安全边界", () => {
-  it("createBranch 不直接拼接用户输入", async () => {
+  it("createBranch 安全校验拒绝危险分支名", async () => {
     const { createBranch } = await import("../src/pr/git.js");
     const log = { info: () => {}, verbose: () => {}, error: () => {}, warn: () => {} };
 
-    // createBranch 内部使用 rev-parse --verify 来检查，然后 checkout -b
-    // execSync 以数组参数形式调用，天然防注入
-    // 抛错是预期的（tmp 目录下无 git 仓库），但不应导致任意命令执行
+    // 危险分支名应被 assertSafeRef 拒绝
+    expect(() => {
+      createBranch("/nonexistent/dir", "branch; rm -rf /", log);
+    }).toThrow("不允许的分支名");
+  }, 5000);
+
+  it("createBranch 接受合法分支名（即便目录不存在也应报 git 错误而非注入）", async () => {
+    const { createBranch } = await import("../src/pr/git.js");
+    const log = { info: () => {}, verbose: () => {}, error: () => {}, warn: () => {} };
+
+    // 合法分支名 + 无效目录 → 预期抛错（非注入类错误）
     expect(() => {
       createBranch("/nonexistent/dir", "valid-branch-name", log);
-    }).not.toThrow();
+    }).toThrow();
   }, 5000);
 });
 
 describe("README 文件名约定", () => {
   it("英文 README 命名只能是 README.en.md / README_EN.md / README-en.md", () => {
-    // 验证 detectEnglishReadme 的正则模式不匹配 README.md
+    // 验证 detectEnglishReadme 的正则模式
     const patterns = [/README\.en\.md/i, /README_EN\.md/i, /README-en\.md/i];
-    const readmeName = "README.md";
-    const enReadmeName = "README.en.md";
 
+    // README.md 不应匹配任何英文 README 模式
+    const readmeName = "README.md";
     for (const p of patterns) {
       expect(p.test(readmeName)).toBe(false);
-      expect(p.test(enReadmeName)).toBe(true);
     }
+
+    // README.en.md 应匹配 README\.en\.md
+    expect(/README\.en\.md/i.test("README.en.md")).toBe(true);
+    // README_EN.md 应匹配 README_EN\.md
+    expect(/README_EN\.md/i.test("README_EN.md")).toBe(true);
+    // README-en.md 应匹配 README-en\.md
+    expect(/README-en\.md/i.test("README-en.md")).toBe(true);
   });
 });

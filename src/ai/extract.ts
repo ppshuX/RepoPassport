@@ -15,10 +15,11 @@ export async function extractFacts(
   repoMeta: RepoMeta,
   provider: Provider,
   log: Logger,
+  languages?: string[],
 ): Promise<RepoFacts> {
   log.info("提取仓库事实...");
 
-  const systemPrompt = buildExtractSystemPrompt();
+  const systemPrompt = buildExtractSystemPrompt(languages);
   const userPrompt = buildExtractUserPrompt(files, repoMeta);
 
   const maxRetries = 2;
@@ -119,8 +120,12 @@ export async function extractFacts(
   throw lastError || new Error("事实提取失败");
 }
 
-function buildExtractSystemPrompt(): string {
-  return `You are a code analysis engine. Your ONLY job is to extract structured facts about a repository from the provided source files.
+function buildExtractSystemPrompt(languages?: string[]): string {
+  const langNote = languages && languages.length > 0
+    ? `\nThis repository uses: ${languages.join(", ")}. Adapt your analysis to these ecosystems (e.g., Go uses go.mod for deps, Python uses pyproject.toml, Rust uses Cargo.toml).`
+    : "";
+
+  return `You are a code analysis engine. Your ONLY job is to extract structured facts about a repository from the provided source files.${langNote}
 
 Output MUST be valid JSON matching this schema:
 {
@@ -147,12 +152,12 @@ Output MUST be valid JSON matching this schema:
 
 CRITICAL RULES:
 1. Each item MUST have at least 1 evidence with specific filePath from the provided files.
-2. Use "static" for facts directly read from config files (package.json, tsconfig.json).
+2. Use "static" for facts directly read from config files (package.json, pyproject.toml, go.mod, Cargo.toml, etc).
 3. Use "ai-inferred" for facts inferred from source code or README.
 4. DO NOT invent facts not supported by the provided files. If unsure, skip the item.
 5. DO NOT guess package purposes from names. Only report what you find in the files.
-6. Tech stack items MUST come from package.json dependencies/devDependencies.
-7. Installation instructions MUST be based on package.json scripts or README content.
+6. Tech stack items MUST come from config/dependency files found in the repository.
+7. Installation instructions MUST be based on build scripts (npm scripts, Makefile, etc) or README content.
 8. Set confidence to 0 for items you are unsure about.
 9. Output ONLY the JSON object, no markdown, no explanations.
 

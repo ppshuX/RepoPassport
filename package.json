@@ -10,18 +10,27 @@
   "scripts": {
     "dev": "tsc --watch",
     "build": "tsc",
+    "build:client": "cd client && npm run build",
+    "dev:client": "cd client && npm run dev",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "web": "node dist/index.js web"
   },
   "dependencies": {
     "commander": "^13.1.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "uuid": "^11.1.0",
+    "ws": "^8.21.0",
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^22.15.30",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }

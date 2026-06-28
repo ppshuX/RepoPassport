@@ -108,7 +108,7 @@ export class GitHubAdapter implements PlatformAdapter {
   async forkRepo(owner: string, repo: string, log: Logger): Promise<ForkResult> {
     log.info(`正在 Fork ${owner}/${repo} ...`);
 
-    const cmd = `gh repo fork ${owner}/${repo} --clone=false --remote=false --fork-name ${repo}`;
+    const cmd = `gh repo fork ${owner}/${repo} --clone=false --fork-name ${repo}`;
     log.verbose(cmd);
 
     const stdout = this.gh(cmd, {
@@ -147,6 +147,7 @@ export class GitHubAdapter implements PlatformAdapter {
 
     log.info(`正在创建 Draft PR 到 ${targetOwner}/${targetRepo} ...`);
 
+    const titleEscaped = title.replace(/"/g, '\\"');
     const bodyEscaped = body.replace(/"/g, '\\"').replace(/\n/g, "\\n");
 
     const cmd =
@@ -154,7 +155,7 @@ export class GitHubAdapter implements PlatformAdapter {
       `--repo ${targetOwner}/${targetRepo} ` +
       `--base ${baseBranch} ` +
       `--head ${headUser}:${headBranch} ` +
-      `--title "${title}" ` +
+      `--title "${titleEscaped}" ` +
       `--body "${bodyEscaped}" ` +
       `--draft`;
 
